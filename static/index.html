@@ -1,0 +1,126 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Speech Emotion Recognition System — Diagnostic Dashboard</title>
+    <!-- Google Fonts -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=Outfit:wght@400;600;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+    <div class="app-container">
+        <!-- Header -->
+        <header class="app-header">
+            <div class="header-brand">
+                <div class="brand-icon">🎙️</div>
+                <div>
+                    <h1>Speech Emotion Recognition</h1>
+                    <p class="subtitle">Bangla Speech Audio Diagnostic & Inference Dashboard</p>
+                </div>
+            </div>
+            <div class="header-status">
+                <span class="status-indicator online" id="statusIndicator"></span>
+                <span class="status-text" id="statusText">System Active</span>
+            </div>
+        </header>
+
+        <!-- Main Workspace -->
+        <main class="workspace-grid">
+            <!-- Left Column: Input Modes -->
+            <section class="card input-section">
+                <div class="tabs">
+                    <button class="tab-btn active" id="tabMic" onclick="switchTab('mic')">
+                        <span class="tab-icon">🎤</span> Live Microphone
+                    </button>
+                    <button class="tab-btn" id="tabUpload" onclick="switchTab('upload')">
+                        <span class="tab-icon">📁</span> Audio File Upload
+                    </button>
+                </div>
+
+                <!-- Tab 1: Microphone -->
+                <div class="tab-content active" id="contentMic">
+                    <div class="mic-controls">
+                        <canvas id="waveformCanvas" width="500" height="120"></canvas>
+                        <div class="rec-timer" id="recTimer">00:00</div>
+                        <div class="btn-group">
+                            <button class="btn btn-record" id="btnRecord" onclick="toggleRecording()">
+                                <span class="btn-icon">🔴</span> Start Recording
+                            </button>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Tab 2: File Upload -->
+                <div class="tab-content" id="contentUpload">
+                    <div class="drop-zone" id="dropZone" onclick="document.getElementById('audioFileInput').click()">
+                        <div class="drop-icon">☁️</div>
+                        <p class="drop-text">Drag & drop your <strong>.wav, .mp3, .ogg, .flac</strong> audio file here</p>
+                        <p class="drop-subtext">or click to browse files (Max limit: 15 MB)</p>
+                        <input type="file" id="audioFileInput" accept="audio/*,.wav,.mp3,.ogg,.flac" style="display: none;" onchange="handleFileSelect(event)">
+                    </div>
+                    <div class="file-preview" id="filePreview" style="display: none;">
+                        <div class="file-info">
+                            <span class="file-icon">🎵</span>
+                            <span class="file-name" id="fileName">sample.wav</span>
+                            <span class="file-size" id="fileSize">1.2 MB</span>
+                        </div>
+                        <audio id="audioPlayer" controls style="width: 100%; margin-top: 12px;"></audio>
+                        <button class="btn btn-primary" id="btnPredictFile" onclick="analyzeSelectedFile()" style="margin-top: 15px; width: 100%;">
+                            ⚡ Run Emotion Analysis
+                        </button>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Right Column: Emotion Analysis Results -->
+            <section class="card results-section">
+                <div class="results-header">
+                    <h2>Emotion Analysis Results</h2>
+                    <span class="latency-badge" id="latencyBadge" style="display: none;">⚡ 0ms</span>
+                </div>
+
+                <!-- Placeholder state -->
+                <div class="placeholder-state" id="placeholderState">
+                    <div class="placeholder-icon">🧠</div>
+                    <p>Record voice or upload an audio file to analyze emotional speech features.</p>
+                </div>
+
+                <!-- Active Results State -->
+                <div class="results-content" id="resultsContent" style="display: none;">
+                    <!-- Winning Emotion Hero Badge -->
+                    <div class="winner-hero" id="winnerHero">
+                        <div class="winner-emoji" id="winnerEmoji">😃</div>
+                        <div class="winner-details">
+                            <span class="winner-label">Detected Emotion</span>
+                            <h3 class="winner-title" id="winnerTitle">HAPPY</h3>
+                            <span class="winner-confidence" id="winnerConfidence">94.8% Confidence</span>
+                        </div>
+                    </div>
+
+                    <!-- Emotion Probability Distribution Bars -->
+                    <div class="distribution-title">Confidence Distribution across 7 Emotions</div>
+                    <div class="probability-bars" id="probabilityBars">
+                        <!-- Bars populated dynamically by app.js -->
+                    </div>
+                </div>
+
+                <!-- Loading State Overlay -->
+                <div class="loading-overlay" id="loadingOverlay" style="display: none;">
+                    <div class="spinner"></div>
+                    <p>Extracting 46 acoustic features & running 1D-CNN inference...</p>
+                </div>
+            </section>
+        </main>
+
+        <!-- Footer -->
+        <footer class="app-footer">
+            <p>Speech Emotion Recognition Engine • 1D-CNN CascadeCovM1 Architecture • 46-Dim MFCC + Tonnetz</p>
+        </footer>
+    </div>
+
+    <script src="/static/app.js"></script>
+</body>
+</html>
