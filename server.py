@@ -7,6 +7,8 @@ Full-stack FastAPI backend with:
 - Dynamic Application Config (DB-backed key-value store)
 - Model Upload, Validation & Hot-Swap Management
 - Prediction with history logging
+- Rate limiting on sensitive endpoints
+- Structured error handling with request IDs
 - Static Web Dashboard serving
 """
 
@@ -14,16 +16,24 @@ import os
 import sys
 import tempfile
 import time
-import logging
+import uuid
 from typing import List
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, File, UploadFile, HTTPException, status, Depends, Query
+from fastapi import FastAPI, File, UploadFile, HTTPException, status, Depends, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy.orm import Session
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.util import get_remote_address
+from slowapi.errors import RateLimitExceeded
 
+from config import (
+    CORS_ORIGINS, MAX_FILE_SIZE_BYTES, MAX_BATCH_FILES,
+    ALLOWED_AUDIO_EXTENSIONS, IS_PRODUCTION, ENV,
+    RATE_LIMIT_AUTH, RATE_LIMIT_PREDICT, HOST, PORT
+)
 from database import get_db, init_database, User, AppConfig, UploadedModel, PredictionLog
 from auth import (
     hash_password, verify_password,
@@ -35,63 +45,131 @@ from schemas import (
     ConfigUpdate, ConfigResponse, ModelResponse, PredictionLogResponse, MessageResponse
 )
 from inference_engine import SERInferenceEngine
+from logging_config import setup_logging, get_logger
 import model_manager
 
-# Configuration
-MAX_FILE_SIZE_BYTES = 15 * 1024 * 1024  # 15 MB limit
-MAX_BATCH_FILES = 20
-ALLOWED_EXTENSIONS = [".wav", ".mp3", ".ogg", ".flac"]
+# Initialize logging FIRST
+setup_logging()
+logger = get_logger("server")
 
 # Global Inference Engine Reference
 engine = None
+
+# Rate Limiter
+limiter = Limiter(key_func=get_remote_address)
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """App startup and shutdown lifecycle manager."""
     global engine
-    print("=" * 60)
-    print("  🎙️  SentiVox — Speech Emotion Recognition Platform")
-    print("=" * 60)
-    print("[+] Initializing database and seeding defaults...")
+    logger.info("=" * 60)
+    logger.info("  SentiVox — Speech Emotion Recognition Platform")
+    logger.info("  Environment: %s", ENV)
+    logger.info("=" * 60)
+    logger.info("Initializing database and seeding defaults...")
     init_database()
-    print("[+] Loading inference engine...")
-    engine = SERInferenceEngine()
-    print("[✓] SentiVox is ready!")
+    logger.info("Loading inference engine...")
+    try:
+        engine = SERInferenceEngine()
+        logger.info("SentiVox is ready! Listening on %s:%d", HOST, PORT)
+    except Exception as e:
+        logger.error("Failed to initialize inference engine: %s", str(e), exc_info=True)
+        logger.warning("Server starting WITHOUT model — predictions will be unavailable")
     yield
-    print("[+] Shutting down SentiVox...")
+    logger.info("Shutting down SentiVox...")
 
 
 app = FastAPI(
     title="SentiVox API",
     description="Enterprise Speech Emotion Recognition Platform with Authentication, ACL & Model Management",
-    version="3.0.0",
-    lifespan=lifespan
+    version="3.1.0",
+    lifespan=lifespan,
+    docs_url="/docs" if not IS_PRODUCTION else None,
+    redoc_url="/redoc" if not IS_PRODUCTION else None,
 )
 
-# CORS Configuration — allow all origins for mobile app development
+# Register rate limiter
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+
+# CORS Configuration
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=CORS_ORIGINS,
     allow_credentials=True,
-    allow_methods=["*"],
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
     allow_headers=["*"],
 )
+
+
+# ─── Request Middleware ───────────────────────────────────────────────────────
+
+@app.middleware("http")
+async def request_context_middleware(request: Request, call_next):
+    """Add request ID and logging context to every request."""
+    request_id = str(uuid.uuid4())[:8]
+    request.state.request_id = request_id
+
+    start_time = time.perf_counter()
+    response = await call_next(request)
+    duration_ms = round((time.perf_counter() - start_time) * 1000, 1)
+
+    # Log request (skip health checks in production to reduce noise)
+    if not (IS_PRODUCTION and request.url.path in ("/health", "/ready")):
+        logger.info(
+            "[%s] %s %s → %d (%.1fms)",
+            request_id, request.method, request.url.path,
+            response.status_code, duration_ms
+        )
+
+    response.headers["X-Request-ID"] = request_id
+    response.headers["X-Response-Time"] = f"{duration_ms}ms"
+    return response
+
+
+# ─── Global Exception Handler ────────────────────────────────────────────────
+
+@app.exception_handler(Exception)
+async def global_exception_handler(request: Request, exc: Exception):
+    """Catch-all handler to prevent stack traces from leaking to clients."""
+    request_id = getattr(request.state, "request_id", "unknown")
+    logger.error(
+        "[%s] Unhandled exception on %s %s: %s",
+        request_id, request.method, request.url.path, str(exc),
+        exc_info=True
+    )
+
+    # In development, return the actual error; in production, return generic message
+    detail = str(exc) if not IS_PRODUCTION else "An internal server error occurred."
+    return JSONResponse(
+        status_code=500,
+        content={"detail": detail, "request_id": request_id}
+    )
 
 
 def validate_audio_file(file: UploadFile):
     """Validate file extension."""
     filename = file.filename or ""
     ext = os.path.splitext(filename)[1].lower()
-    if ext not in ALLOWED_EXTENSIONS:
+    if ext not in ALLOWED_AUDIO_EXTENSIONS:
         raise HTTPException(
             status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
-            detail=f"Unsupported file extension '{ext}'. Allowed: {', '.join(ALLOWED_EXTENSIONS)}"
+            detail=f"Unsupported file extension '{ext}'. Allowed: {', '.join(ALLOWED_AUDIO_EXTENSIONS)}"
+        )
+
+
+def _require_engine():
+    """Guard: ensure inference engine is loaded before prediction."""
+    if engine is None or not engine.is_ready:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Inference engine is not available. The model may still be loading."
         )
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# HEALTH CHECK
+# HEALTH & READINESS CHECKS
 # ═══════════════════════════════════════════════════════════════════════════════
 
 @app.get("/health", summary="Health Status & System Diagnostics", tags=["System"])
@@ -103,8 +181,9 @@ async def health_check():
         "status": "healthy",
         "app_name": "SentiVox",
         "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-        "version": "3.0.0",
-        "model_loaded": engine is not None and engine.model is not None,
+        "version": "3.1.0",
+        "environment": ENV,
+        "model_loaded": engine is not None and engine.is_ready,
         "hardware": {
             "gpu_available": len(gpus) > 0,
             "gpu_device": gpus[0].name if gpus else "N/A (CPU)",
@@ -114,12 +193,41 @@ async def health_check():
     }
 
 
+@app.get("/ready", summary="Readiness Probe", tags=["System"])
+async def readiness_probe(db: Session = Depends(get_db)):
+    """
+    Kubernetes/load-balancer readiness probe.
+    Returns 200 only when both the model and database are operational.
+    """
+    errors = []
+
+    # Check model readiness
+    if engine is None or not engine.is_ready:
+        errors.append("Inference engine not ready")
+
+    # Check database connectivity
+    try:
+        from sqlalchemy import text
+        db.execute(text("SELECT 1"))
+    except Exception as e:
+        errors.append(f"Database unreachable: {str(e)}")
+
+    if errors:
+        return JSONResponse(
+            status_code=503,
+            content={"ready": False, "errors": errors}
+        )
+
+    return {"ready": True}
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # AUTHENTICATION ROUTES
 # ═══════════════════════════════════════════════════════════════════════════════
 
 @app.post("/api/v1/auth/register", response_model=MessageResponse, tags=["Authentication"])
-async def register(body: UserRegister, db: Session = Depends(get_db)):
+@limiter.limit(RATE_LIMIT_AUTH)
+async def register(request: Request, body: UserRegister, db: Session = Depends(get_db)):
     """Register a new USER account."""
     existing = db.query(User).filter(User.email == body.email).first()
     if existing:
@@ -134,14 +242,18 @@ async def register(body: UserRegister, db: Session = Depends(get_db)):
     )
     db.add(user)
     db.commit()
+
+    logger.info("New user registered: %s", body.email)
     return {"message": "Registration successful.", "detail": f"Account created for {body.email}"}
 
 
 @app.post("/api/v1/auth/login", response_model=TokenResponse, tags=["Authentication"])
-async def login(body: UserLogin, db: Session = Depends(get_db)):
+@limiter.limit(RATE_LIMIT_AUTH)
+async def login(request: Request, body: UserLogin, db: Session = Depends(get_db)):
     """Authenticate and receive JWT access & refresh tokens."""
     user = db.query(User).filter(User.email == body.email).first()
     if not user or not verify_password(body.password, user.password_hash):
+        logger.warning("Failed login attempt for email: %s", body.email)
         raise HTTPException(status_code=401, detail="Invalid email or password.")
 
     if not user.is_active:
@@ -150,6 +262,7 @@ async def login(body: UserLogin, db: Session = Depends(get_db)):
     access_token = create_access_token(user.id, user.email, user.role)
     refresh_token = create_refresh_token(user.id)
 
+    logger.info("User logged in: %s (role=%s)", user.email, user.role)
     return {
         "access_token": access_token,
         "refresh_token": refresh_token,
@@ -159,7 +272,8 @@ async def login(body: UserLogin, db: Session = Depends(get_db)):
 
 
 @app.post("/api/v1/auth/refresh", tags=["Authentication"])
-async def refresh_token(body: RefreshTokenRequest, db: Session = Depends(get_db)):
+@limiter.limit(RATE_LIMIT_AUTH)
+async def refresh_token(request: Request, body: RefreshTokenRequest, db: Session = Depends(get_db)):
     """Refresh an expired access token using a valid refresh token."""
     payload = decode_token(body.refresh_token)
     if payload.get("type") != "refresh":
@@ -199,24 +313,27 @@ async def get_config(
 # ═══════════════════════════════════════════════════════════════════════════════
 
 @app.post("/api/v1/predict", summary="Predict Emotion from Audio", tags=["Prediction"])
+@limiter.limit(RATE_LIMIT_PREDICT)
 async def predict_single(
+    request: Request,
     file: UploadFile = File(...),
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
     """Accepts audio file and returns predicted emotion with confidence distribution. Requires authentication."""
+    _require_engine()
     validate_audio_file(file)
 
     temp_path = None
     try:
         content = await file.read()
         if len(content) > MAX_FILE_SIZE_BYTES:
-            raise HTTPException(status_code=400, detail="File size exceeds 15MB limit.")
+            raise HTTPException(status_code=400, detail=f"File size exceeds {MAX_FILE_SIZE_BYTES // (1024*1024)}MB limit.")
         if len(content) == 0:
             raise HTTPException(status_code=400, detail="Uploaded file is empty.")
 
         ext = os.path.splitext(file.filename)[1].lower() if file.filename else ".wav"
-        with tempfile.NamedTemporaryFile(delete=False, suffix=ext, dir="/tmp") as tmp:
+        with tempfile.NamedTemporaryFile(delete=False, suffix=ext, dir=tempfile.gettempdir()) as tmp:
             tmp.write(content)
             temp_path = tmp.name
 
@@ -240,23 +357,28 @@ async def predict_single(
     except HTTPException:
         raise
     except Exception as e:
-        logging.error(f"Inference error: {str(e)}", exc_info=True)
+        db.rollback()
+        logger.error("Inference error for user_id=%d: %s", current_user.id, str(e), exc_info=True)
         raise HTTPException(status_code=500, detail=f"Error processing audio: {str(e)}")
     finally:
         if temp_path and os.path.exists(temp_path):
             try:
                 os.unlink(temp_path)
-            except Exception:
-                pass
+            except OSError:
+                logger.warning("Failed to clean up temp file: %s", temp_path)
 
 
 @app.post("/api/v1/predict/batch", summary="Batch Predict Emotion", tags=["Prediction"])
+@limiter.limit(RATE_LIMIT_PREDICT)
 async def predict_batch(
+    request: Request,
     files: List[UploadFile] = File(...),
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
     """Accepts up to 20 audio files. Requires authentication."""
+    _require_engine()
+
     if len(files) > MAX_BATCH_FILES:
         raise HTTPException(status_code=400, detail=f"Max {MAX_BATCH_FILES} files per batch.")
 
@@ -267,11 +389,14 @@ async def predict_batch(
         try:
             content = await file.read()
             if len(content) > MAX_FILE_SIZE_BYTES:
-                results.append({"filename": file.filename, "error": "File exceeds 15MB"})
+                results.append({"filename": file.filename, "error": f"File exceeds {MAX_FILE_SIZE_BYTES // (1024*1024)}MB"})
+                continue
+            if len(content) == 0:
+                results.append({"filename": file.filename, "error": "File is empty"})
                 continue
 
             ext = os.path.splitext(file.filename)[1].lower() if file.filename else ".wav"
-            with tempfile.NamedTemporaryFile(delete=False, suffix=ext, dir="/tmp") as tmp:
+            with tempfile.NamedTemporaryFile(delete=False, suffix=ext, dir=tempfile.gettempdir()) as tmp:
                 tmp.write(content)
                 temp_path = tmp.name
 
@@ -290,21 +415,27 @@ async def predict_batch(
             results.append(prediction)
 
         except Exception as e:
+            logger.warning("Batch predict error for file %s: %s", file.filename, str(e))
             results.append({"filename": file.filename, "error": str(e)})
         finally:
             if temp_path and os.path.exists(temp_path):
                 try:
                     os.unlink(temp_path)
-                except Exception:
+                except OSError:
                     pass
 
-    db.commit()
+    try:
+        db.commit()
+    except Exception as e:
+        db.rollback()
+        logger.error("Failed to commit batch prediction logs: %s", str(e))
+
     return JSONResponse(status_code=200, content={"total_files": len(files), "results": results})
 
 
 @app.get("/api/v1/predictions/history", response_model=List[PredictionLogResponse], tags=["Prediction"])
 async def prediction_history(
-    limit: int = Query(default=50, le=200),
+    limit: int = Query(default=50, ge=1, le=200),
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
@@ -334,10 +465,16 @@ async def update_config(
     if not config:
         raise HTTPException(status_code=404, detail=f"Config key '{body.config_key}' not found.")
 
+    old_value = config.config_value
     config.config_value = body.config_value
     config.updated_by = admin.email
     db.commit()
     db.refresh(config)
+
+    logger.info(
+        "Config updated by %s: %s = '%s' (was '%s')",
+        admin.email, body.config_key, body.config_value, old_value
+    )
     return ConfigResponse.model_validate(config)
 
 
@@ -429,4 +566,4 @@ if os.path.exists(static_dir):
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("server:app", host="127.0.0.1", port=8000, reload=True)
+    uvicorn.run("server:app", host=HOST, port=PORT, reload=not IS_PRODUCTION)

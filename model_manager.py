@@ -5,19 +5,21 @@ Handles model file upload, validation, activation (hot-swap), listing, and delet
 """
 
 import os
-import shutil
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 
 import numpy as np
 import tensorflow as tf
 from sqlalchemy.orm import Session
 
+from config import MODELS_DIR, FEATURE_DIM, NUM_CLASSES
 from database import UploadedModel, AppConfig
+from logging_config import get_logger
 
+logger = get_logger("model_manager")
 
-MODELS_DIR = os.path.join(os.path.dirname(__file__), "models")
-os.makedirs(MODELS_DIR, exist_ok=True)
+# Ensure models directory exists
+MODELS_DIR.mkdir(parents=True, exist_ok=True)
 
 
 def validate_model_file(file_path: str) -> dict:
@@ -36,22 +38,24 @@ def validate_model_file(file_path: str) -> dict:
 
     # Validate input shape is compatible with (batch, 46, 1)
     if len(input_shape) != 3:
-        raise ValueError(f"Expected 3D input shape (batch, 46, 1), got {input_shape}")
+        raise ValueError(f"Expected 3D input shape (batch, {FEATURE_DIM}, 1), got {input_shape}")
 
     feature_dim = input_shape[1]
-    if feature_dim is not None and feature_dim != 46:
-        raise ValueError(f"Expected input feature dimension of 46, got {feature_dim}")
+    if feature_dim is not None and feature_dim != FEATURE_DIM:
+        raise ValueError(f"Expected input feature dimension of {FEATURE_DIM}, got {feature_dim}")
 
-    # Validate output shape has 7 classes
+    # Validate output shape has correct number of classes
     num_classes = output_shape[-1]
-    if num_classes != 7:
-        raise ValueError(f"Expected 7 output classes, got {num_classes}")
+    if num_classes != NUM_CLASSES:
+        raise ValueError(f"Expected {NUM_CLASSES} output classes, got {num_classes}")
 
     # Run a sanity forward pass
-    dummy_input = np.random.randn(1, 46, 1).astype(np.float32)
+    dummy_input = np.random.randn(1, FEATURE_DIM, 1).astype(np.float32)
     predictions = model.predict(dummy_input, verbose=0)
-    if predictions.shape != (1, 7):
+    if predictions.shape != (1, NUM_CLASSES):
         raise ValueError(f"Forward pass returned unexpected shape: {predictions.shape}")
+
+    logger.info("Model validation passed: input=%s, output=%s", input_shape, output_shape)
 
     return {
         "input_shape": str(input_shape),
@@ -65,14 +69,16 @@ def save_model_file(file_content: bytes, original_name: str, user_id: int, db: S
     Save an uploaded model file to disk and register it in the database.
     """
     # Generate unique filename
-    timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
     unique_id = uuid.uuid4().hex[:8]
     safe_name = f"model_{timestamp}_{unique_id}.h5"
-    file_path = os.path.join(MODELS_DIR, safe_name)
+    file_path = str(MODELS_DIR / safe_name)
 
     # Write file to disk
     with open(file_path, "wb") as f:
         f.write(file_content)
+
+    logger.info("Saved model file to disk: %s (%d bytes)", safe_name, len(file_content))
 
     # Validate model structure
     try:
@@ -81,6 +87,7 @@ def save_model_file(file_content: bytes, original_name: str, user_id: int, db: S
         # Remove invalid file
         if os.path.exists(file_path):
             os.remove(file_path)
+        logger.warning("Model validation failed for %s: %s", original_name, str(e))
         raise e
 
     # Create database record
@@ -97,6 +104,7 @@ def save_model_file(file_content: bytes, original_name: str, user_id: int, db: S
     db.commit()
     db.refresh(model_record)
 
+    logger.info("Registered model in database: id=%d, name=%s", model_record.id, original_name)
     return model_record
 
 
@@ -131,6 +139,7 @@ def activate_model(model_id: int, db: Session, inference_engine) -> UploadedMode
     # Hot-swap inference engine
     inference_engine.reload_model(target_model.file_path)
 
+    logger.info("Activated model id=%d (%s) — hot-swap complete", model_id, target_model.filename)
     return target_model
 
 
@@ -151,8 +160,11 @@ def delete_model(model_id: int, db: Session) -> bool:
     # Remove file from disk
     if os.path.exists(model.file_path):
         os.remove(model.file_path)
+        logger.info("Deleted model file from disk: %s", model.file_path)
 
     # Remove DB record
     db.delete(model)
     db.commit()
+
+    logger.info("Deleted model id=%d (%s) from database", model_id, model.filename)
     return True

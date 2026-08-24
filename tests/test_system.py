@@ -16,6 +16,10 @@ from fastapi.testclient import TestClient
 import sys
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
+# Ensure test environment
+os.environ.setdefault("SENTIVOX_ENV", "development")
+os.environ.setdefault("DATABASE_URL", "sqlite:///test_sentivox.db")
+
 from server import app
 
 
@@ -84,6 +88,28 @@ def test_health_endpoint(api_client):
     assert data["model_loaded"] is True
 
 
+def test_readiness_endpoint(api_client):
+    """Readiness probe confirms model and DB are operational."""
+    response = api_client.get("/ready")
+    assert response.status_code == 200
+    data = response.json()
+    assert data["ready"] is True
+
+
+def test_request_id_header(api_client):
+    """Every response includes X-Request-ID header."""
+    response = api_client.get("/health")
+    assert "x-request-id" in response.headers
+    assert len(response.headers["x-request-id"]) == 8
+
+
+def test_response_time_header(api_client):
+    """Every response includes X-Response-Time header."""
+    response = api_client.get("/health")
+    assert "x-response-time" in response.headers
+    assert response.headers["x-response-time"].endswith("ms")
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # AUTHENTICATION TESTS
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -97,6 +123,26 @@ def test_register_duplicate_email(api_client, user_token):
     })
     assert response.status_code == 400
     assert "already registered" in response.json()["detail"]
+
+
+def test_register_invalid_email_format(api_client):
+    """Registering with an invalid email format returns 422."""
+    response = api_client.post("/api/v1/auth/register", json={
+        "email": "not-an-email",
+        "password": "testpass123",
+        "full_name": "Bad Email User"
+    })
+    assert response.status_code == 422
+
+
+def test_register_short_password(api_client):
+    """Registering with a too-short password returns 422."""
+    response = api_client.post("/api/v1/auth/register", json={
+        "email": "shortpw@test.com",
+        "password": "abc",
+        "full_name": "Short Password User"
+    })
+    assert response.status_code == 422
 
 
 def test_login_invalid_credentials(api_client):
@@ -145,6 +191,14 @@ def test_refresh_token_flow(api_client):
     assert "access_token" in refresh_resp.json()
 
 
+def test_invalid_refresh_token_rejected(api_client):
+    """Using an invalid refresh token returns 401."""
+    response = api_client.post("/api/v1/auth/refresh", json={
+        "refresh_token": "invalid.token.here"
+    })
+    assert response.status_code == 401
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # PREDICTION TESTS (Authenticated)
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -170,6 +224,8 @@ def test_predict_with_user_token(api_client, user_token):
     assert "confidence_score" in data
     assert "probability_distribution" in data
     assert len(data["probability_distribution"]) == 7
+    assert "inference_latency_ms" in data
+    assert data["inference_latency_ms"] > 0
 
 
 def test_predict_with_admin_token(api_client, admin_token):
@@ -192,6 +248,27 @@ def test_unsupported_file_rejection(api_client, user_token):
     assert response.status_code == 415
 
 
+def test_empty_file_rejection(api_client, user_token):
+    """Uploading an empty file returns 400."""
+    headers = {"Authorization": f"Bearer {user_token}"}
+    files = {"file": ("empty.wav", b"", "audio/wav")}
+    response = api_client.post("/api/v1/predict", files=files, headers=headers)
+    assert response.status_code == 400
+
+
+def test_prediction_probabilities_sum_to_one(api_client, user_token):
+    """Model output probabilities should approximately sum to 1.0."""
+    wav_bytes = create_synthetic_wav_bytes()
+    files = {"file": ("sum_test.wav", wav_bytes, "audio/wav")}
+    headers = {"Authorization": f"Bearer {user_token}"}
+
+    response = api_client.post("/api/v1/predict", files=files, headers=headers)
+    assert response.status_code == 200
+    data = response.json()
+    prob_sum = sum(data["probability_distribution"].values())
+    assert abs(prob_sum - 1.0) < 0.01, f"Probabilities sum to {prob_sum}, expected ~1.0"
+
+
 def test_prediction_history(api_client, user_token):
     """User can view their own prediction history from the DB."""
     headers = {"Authorization": f"Bearer {user_token}"}
@@ -203,6 +280,15 @@ def test_prediction_history(api_client, user_token):
     assert len(data) >= 1
     assert "predicted_class" in data[0]
     assert "confidence_score" in data[0]
+
+
+def test_prediction_history_limit(api_client, user_token):
+    """History endpoint respects the limit parameter."""
+    headers = {"Authorization": f"Bearer {user_token}"}
+    response = api_client.get("/api/v1/predictions/history?limit=1", headers=headers)
+    assert response.status_code == 200
+    data = response.json()
+    assert len(data) <= 1
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -223,6 +309,13 @@ def test_user_cannot_update_config(api_client, user_token):
         "config_key": "app_name",
         "config_value": "Hacked"
     })
+    assert response.status_code == 403
+
+
+def test_user_cannot_list_users(api_client, user_token):
+    """USER role gets 403 when trying to list all users."""
+    headers = {"Authorization": f"Bearer {user_token}"}
+    response = api_client.get("/api/v1/admin/users", headers=headers)
     assert response.status_code == 403
 
 
@@ -276,3 +369,19 @@ def test_admin_can_update_config(api_client, admin_token):
     read_resp = api_client.get("/api/v1/config", headers=headers)
     configs = {c["config_key"]: c["config_value"] for c in read_resp.json()}
     assert configs["app_name"] == "SentiVox Pro"
+
+
+def test_admin_cannot_update_nonexistent_config(api_client, admin_token):
+    """Updating a non-existent config key returns 404."""
+    headers = {"Authorization": f"Bearer {admin_token}"}
+    response = api_client.put("/api/v1/admin/config", headers=headers, json={
+        "config_key": "nonexistent_key",
+        "config_value": "test"
+    })
+    assert response.status_code == 404
+
+
+def test_unauthenticated_cannot_read_config(api_client):
+    """Config endpoint requires authentication."""
+    response = api_client.get("/api/v1/config")
+    assert response.status_code == 401 or response.status_code == 403

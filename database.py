@@ -7,7 +7,6 @@ Auto-creates tables and seeds default config + admin on first boot.
 """
 
 import os
-import json
 from datetime import datetime, timezone
 
 from sqlalchemy import (
@@ -15,15 +14,43 @@ from sqlalchemy import (
     DateTime, ForeignKey, JSON, event
 )
 from sqlalchemy.orm import declarative_base, sessionmaker, relationship
+from sqlalchemy.pool import QueuePool, StaticPool
 
-# Database URL — default to SQLite, override with env var for PostgreSQL
-DATABASE_URL = os.environ.get("DATABASE_URL", "sqlite:///sentivox.db")
+from config import DATABASE_URL, SQLITE_WAL_MODE, IS_PRODUCTION
+from logging_config import get_logger
+
+logger = get_logger("database")
+
+# ─── Engine Configuration ─────────────────────────────────────────────────────
+
+_is_sqlite = "sqlite" in DATABASE_URL
+
+# SQLite-specific configuration
+_connect_args = {}
+_pool_class = QueuePool
+
+if _is_sqlite:
+    _connect_args = {"check_same_thread": False}
+    _pool_class = StaticPool  # Better for SQLite single-writer
 
 engine = create_engine(
     DATABASE_URL,
-    connect_args={"check_same_thread": False} if "sqlite" in DATABASE_URL else {},
+    connect_args=_connect_args,
+    pool_pre_ping=True,  # Verify connections before use (prevents stale connections)
     echo=False
 )
+
+
+# Enable WAL mode for SQLite (better concurrent read performance)
+if _is_sqlite and SQLITE_WAL_MODE:
+    @event.listens_for(engine, "connect")
+    def _set_sqlite_pragma(dbapi_conn, connection_record):
+        cursor = dbapi_conn.cursor()
+        cursor.execute("PRAGMA journal_mode=WAL")
+        cursor.execute("PRAGMA synchronous=NORMAL")
+        cursor.execute("PRAGMA busy_timeout=5000")
+        cursor.close()
+
 
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
@@ -103,6 +130,9 @@ def get_db():
     db = SessionLocal()
     try:
         yield db
+    except Exception:
+        db.rollback()
+        raise
     finally:
         db.close()
 
@@ -125,35 +155,43 @@ def seed_default_config(db):
         for cfg in DEFAULT_CONFIGS:
             db.add(AppConfig(**cfg))
         db.commit()
-        print("[✓] Seeded default application config values.")
+        logger.info("Seeded %d default application config values", len(DEFAULT_CONFIGS))
 
 
 def seed_default_admin(db):
     """Create default admin account if no users exist."""
+    from config import DEFAULT_ADMIN_EMAIL, DEFAULT_ADMIN_PASSWORD, DEFAULT_ADMIN_NAME
     from auth import hash_password
 
     existing = db.query(User).count()
     if existing == 0:
         admin = User(
-            email="admin@sentivox.com",
-            password_hash=hash_password("admin123"),
-            full_name="System Administrator",
+            email=DEFAULT_ADMIN_EMAIL,
+            password_hash=hash_password(DEFAULT_ADMIN_PASSWORD),
+            full_name=DEFAULT_ADMIN_NAME,
             role="ADMIN",
             is_active=True
         )
         db.add(admin)
         db.commit()
-        print("[✓] Seeded default admin: admin@sentivox.com / admin123")
+        logger.info("Seeded default admin account: %s", DEFAULT_ADMIN_EMAIL)
+        if DEFAULT_ADMIN_PASSWORD == "admin123" and IS_PRODUCTION:
+            logger.warning(
+                "Default admin password is insecure! Set DEFAULT_ADMIN_PASSWORD env var "
+                "or change it immediately after first login."
+            )
 
 
 def seed_initial_model(db):
     """Register the existing development model in the database."""
+    from config import DEFAULT_MODEL_PATH
+
     existing = db.query(UploadedModel).count()
-    model_path = os.path.join(os.path.dirname(__file__), "models", "CascadeCovM1_BEST.h5")
+    model_path = str(DEFAULT_MODEL_PATH)
     if existing == 0 and os.path.exists(model_path):
         model_record = UploadedModel(
-            filename="CascadeCovM1_BEST.h5",
-            original_name="CascadeCovM1_BEST.h5",
+            filename=DEFAULT_MODEL_PATH.name,
+            original_name=DEFAULT_MODEL_PATH.name,
             file_path=model_path,
             input_shape="(None, 46, 1)",
             num_classes=7,
@@ -162,16 +200,22 @@ def seed_initial_model(db):
         )
         db.add(model_record)
         db.commit()
-        print("[✓] Registered existing development model in database.")
+        logger.info("Registered existing development model: %s", DEFAULT_MODEL_PATH.name)
 
 
 def init_database():
     """Create all tables and seed default data."""
+    logger.info("Initializing database at: %s", DATABASE_URL)
     Base.metadata.create_all(bind=engine)
     db = SessionLocal()
     try:
         seed_default_config(db)
         seed_default_admin(db)
         seed_initial_model(db)
+    except Exception as e:
+        db.rollback()
+        logger.error("Database initialization failed: %s", str(e), exc_info=True)
+        raise
     finally:
         db.close()
+    logger.info("Database initialization complete")

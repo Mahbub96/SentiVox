@@ -6,7 +6,8 @@ Defines strict validation schemas for all API endpoints.
 
 from typing import Optional, Dict, List
 from datetime import datetime
-from pydantic import BaseModel, EmailStr, Field
+from pydantic import BaseModel, EmailStr, Field, field_validator
+import re
 
 
 # ─── Authentication Schemas ───────────────────────────────────────────────────
@@ -15,6 +16,32 @@ class UserRegister(BaseModel):
     email: str = Field(..., min_length=5, max_length=255, examples=["user@example.com"])
     password: str = Field(..., min_length=6, max_length=128)
     full_name: str = Field(..., min_length=1, max_length=255, examples=["Mahbub Alam"])
+
+    @field_validator("email")
+    @classmethod
+    def validate_email_format(cls, v: str) -> str:
+        """Basic email format validation without requiring email-validator package."""
+        pattern = r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
+        if not re.match(pattern, v):
+            raise ValueError("Invalid email format")
+        return v.lower().strip()
+
+    @field_validator("password")
+    @classmethod
+    def validate_password_strength(cls, v: str) -> str:
+        """Ensure password meets minimum complexity requirements."""
+        if len(v.strip()) < 6:
+            raise ValueError("Password must be at least 6 characters (excluding whitespace)")
+        return v
+
+    @field_validator("full_name")
+    @classmethod
+    def validate_full_name(cls, v: str) -> str:
+        """Trim and validate full name."""
+        cleaned = v.strip()
+        if not cleaned:
+            raise ValueError("Full name cannot be empty")
+        return cleaned
 
 
 class UserLogin(BaseModel):
@@ -47,8 +74,8 @@ class RefreshTokenRequest(BaseModel):
 # ─── Application Config Schemas ──────────────────────────────────────────────
 
 class ConfigUpdate(BaseModel):
-    config_key: str
-    config_value: str
+    config_key: str = Field(..., min_length=1, max_length=100)
+    config_value: str = Field(..., max_length=2000)
 
 
 class ConfigResponse(BaseModel):

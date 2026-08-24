@@ -2,34 +2,34 @@
 auth.py — SentiVox Authentication & Access Control Layer
 
 Features:
-- Password hashing with passlib/bcrypt
+- Password hashing with bcrypt
 - JWT access & refresh token creation/verification
 - FastAPI dependency guards: get_current_user, require_role
 """
 
-import os
 from datetime import datetime, timedelta, timezone
 
+import bcrypt as _bcrypt
 import jwt
 from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from sqlalchemy.orm import Session
 
+from config import (
+    JWT_SECRET_KEY, JWT_ALGORITHM,
+    ACCESS_TOKEN_EXPIRE_MINUTES, REFRESH_TOKEN_EXPIRE_DAYS
+)
 from database import get_db, User
+from logging_config import get_logger
 
-# ─── Configuration ────────────────────────────────────────────────────────────
+logger = get_logger("auth")
 
-SECRET_KEY = os.environ.get("JWT_SECRET_KEY", "sentivox-dev-secret-key-change-in-production")
-ALGORITHM = "HS256"
-ACCESS_TOKEN_EXPIRE_MINUTES = 30
-REFRESH_TOKEN_EXPIRE_DAYS = 7
-
-# ─── Password Hashing ────────────────────────────────────────────────────────
-
-import bcrypt as _bcrypt
+# ─── Security Scheme ────────────────────────────────────────────────────────
 
 security_scheme = HTTPBearer(auto_error=False)
 
+
+# ─── Password Hashing ────────────────────────────────────────────────────────
 
 def hash_password(plain_password: str) -> str:
     """Hash a plaintext password using bcrypt."""
@@ -40,42 +40,48 @@ def hash_password(plain_password: str) -> str:
 
 def verify_password(plain_password: str, hashed_password: str) -> bool:
     """Verify a plaintext password against its bcrypt hash."""
-    return _bcrypt.checkpw(
-        plain_password.encode("utf-8"),
-        hashed_password.encode("utf-8")
-    )
+    try:
+        return _bcrypt.checkpw(
+            plain_password.encode("utf-8"),
+            hashed_password.encode("utf-8")
+        )
+    except Exception:
+        logger.warning("Password verification failed due to invalid hash format")
+        return False
 
 
 # ─── JWT Token Operations ────────────────────────────────────────────────────
 
 def create_access_token(user_id: int, email: str, role: str) -> str:
-    """Create a JWT access token with 30-minute expiry."""
+    """Create a JWT access token with configurable expiry."""
+    now = datetime.now(timezone.utc)
     payload = {
         "sub": str(user_id),
         "email": email,
         "role": role,
         "type": "access",
-        "exp": datetime.now(timezone.utc) + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES),
-        "iat": datetime.now(timezone.utc)
+        "exp": now + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES),
+        "iat": now
     }
-    return jwt.encode(payload, SECRET_KEY, algorithm=ALGORITHM)
+    return jwt.encode(payload, JWT_SECRET_KEY, algorithm=JWT_ALGORITHM)
 
 
 def create_refresh_token(user_id: int) -> str:
-    """Create a JWT refresh token with 7-day expiry."""
+    """Create a JWT refresh token with configurable expiry."""
+    now = datetime.now(timezone.utc)
     payload = {
         "sub": str(user_id),
         "type": "refresh",
-        "exp": datetime.now(timezone.utc) + timedelta(days=REFRESH_TOKEN_EXPIRE_DAYS),
-        "iat": datetime.now(timezone.utc)
+        "exp": now + timedelta(days=REFRESH_TOKEN_EXPIRE_DAYS),
+        "iat": now
     }
-    return jwt.encode(payload, SECRET_KEY, algorithm=ALGORITHM)
+    return jwt.encode(payload, JWT_SECRET_KEY, algorithm=JWT_ALGORITHM)
 
 
 def decode_token(token: str) -> dict:
     """Decode and verify a JWT token. Raises HTTPException on failure."""
     try:
-        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        payload = jwt.decode(token, JWT_SECRET_KEY, algorithms=[JWT_ALGORITHM])
         return payload
     except jwt.ExpiredSignatureError:
         raise HTTPException(
@@ -135,6 +141,10 @@ def require_role(allowed_roles: list):
     """
     async def role_checker(current_user: User = Depends(get_current_user)) -> User:
         if current_user.role not in allowed_roles:
+            logger.warning(
+                "Access denied for user_id=%d (role=%s) — required: %s",
+                current_user.id, current_user.role, allowed_roles
+            )
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail=f"Access denied. Required role: {', '.join(allowed_roles)}. Your role: {current_user.role}"
