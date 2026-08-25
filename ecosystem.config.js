@@ -2,7 +2,7 @@ module.exports = {
   apps: [{
     name: "ser-api-service",
     script: "venv/bin/uvicorn",
-    args: "server:app --host 127.0.0.1 --port 8000 --proxy-headers --forwarded-allow-ips='*'",
+    args: "server:app --host 0.0.0.0 --port 8000 --proxy-headers --forwarded-allow-ips='*'",
     instances: 1,
     autorestart: true,
     watch: false,

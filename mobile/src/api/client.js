@@ -2,13 +2,15 @@
 
 import axios from 'axios';
 
-// API Base URL — Configurable for different environments
-// For local dev:   http://10.0.2.2:8000 (Android emulator)
-//                  http://192.168.1.X:8000 (Physical device local network)
-// For production:  https://sentivox-api.example.com
-let currentBaseUrl = __DEV__
-  ? 'http://10.0.2.2:8000'
-  : 'http://10.0.2.2:8000';
+// ─── Production Server ──────────────────────────────────────────
+// Your Oracle Cloud server at 144.24.142.3
+const PRODUCTION_URL = 'http://144.24.142.3:8000';
+
+// For local development on Android emulator: 'http://10.0.2.2:8000'
+// For local development on physical device: 'http://192.168.1.X:8000'
+const DEV_URL = 'http://10.0.2.2:8000';
+
+let currentBaseUrl = __DEV__ ? DEV_URL : PRODUCTION_URL;
 
 export const setBaseUrl = (url) => {
   if (url) {
@@ -24,7 +26,7 @@ const client = axios.create({
   headers: {
     'Content-Type': 'application/json',
   },
-  timeout: 30000, // 30s timeout for audio inference
+  timeout: 60000, // 60s timeout — inference can be slow on CPU-only server
 });
 
 let authToken = null;
@@ -63,4 +65,3 @@ client.interceptors.response.use(
 );
 
 export default client;
-
