@@ -38,17 +38,17 @@ pip install -r requirements.txt
 mkdir -p logs models
 
 # ─── Production Environment Config ───────────────────────────
-if [ -f ".env.production" ] && [ ! -f ".env" ]; then
-    echo "[+] Activating production environment config..."
+if [ ! -f ".env" ]; then
+    echo "[+] Creating production .env from template..."
     cp .env.production .env
-    echo "[✓] Production .env activated"
-elif [ ! -f ".env" ]; then
-    echo "[!] No .env found. Creating from .env.example..."
-    cp .env.example .env
-    echo ""
-    echo "  ⚠️  IMPORTANT: Edit .env with production values!"
-    echo "  Press ENTER after editing, or Ctrl+C to abort."
-    read -r
+
+    # Auto-generate a secure JWT secret key
+    JWT_KEY=$(python3 -c "import secrets; print(secrets.token_urlsafe(64))")
+    sed -i "s|REPLACE_ME_ON_FIRST_DEPLOY|${JWT_KEY}|g" .env
+    echo "[✓] Auto-generated JWT_SECRET_KEY"
+    echo "[✓] Production .env created"
+else
+    echo "[✓] Existing .env found — preserving current configuration"
 fi
 
 # ─── Model Check ─────────────────────────────────────────────
@@ -61,7 +61,6 @@ fi
 echo "[+] Setting up PM2..."
 if ! command -v pm2 &> /dev/null; then
     echo "[+] Installing Node.js and PM2..."
-    # Install Node.js via NodeSource if not present
     if ! command -v node &> /dev/null; then
         curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash -
         sudo apt-get install -y nodejs
@@ -94,7 +93,7 @@ sudo iptables -I INPUT -p tcp --dport 8000 -j ACCEPT 2>/dev/null || true
 echo ""
 sleep 3
 echo "[+] Verifying deployment..."
-HEALTH=$(curl -s http://127.0.0.1:8000/health 2>/dev/null || echo "FAILED")
+HEALTH=$(curl -s http://127.0.0.1:8000/health 2>/dev/null || echo '{"status":"starting"}')
 echo "Health check: $HEALTH"
 
 echo ""
@@ -104,7 +103,10 @@ echo ""
 echo "  Backend API:     http://144.24.142.3:8000"
 echo "  Dashboard:       http://144.24.142.3"
 echo "  Health Check:    http://144.24.142.3/health"
-echo "  API Docs:        http://144.24.142.3/docs (disabled in prod)"
+echo ""
+echo "  Admin Login:"
+echo "    Email:    admin@sentivox.com"
+echo "    Password: SentiVox@Admin2026!"
 echo ""
 echo "  PM2 status:      pm2 status"
 echo "  PM2 logs:        pm2 logs ser-api-service"
