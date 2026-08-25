@@ -49,10 +49,13 @@ htmlcov/
 # ─── Jupyter ──────────────────────────────────────────────────
 .ipynb_checkpoints/
 
-# ─── Node (Mobile App) ───────────────────────────────────────
+# ─── Node & Mobile App ───────────────────────────────────────
 mobile/node_modules/
 mobile/.expo/
 mobile/dist/
+mobile/android/
+mobile/ios/
+*.apk
 
 # ─── Data (training datasets) ────────────────────────────────
 data/

@@ -10,16 +10,20 @@ import {
   ActivityIndicator,
 } from 'react-native';
 import { AuthContext } from '../context/AuthContext';
+import { getBaseUrl, setBaseUrl } from '../api/client';
 
 export default function LoginScreen({ navigation }) {
-  const [email, setEmail] = useState('');
-  const [password, setPassword] = useState('');
+  const [serverUrl, setServerUrl] = useState(getBaseUrl());
+  const [showServerConfig, setShowServerConfig] = useState(false);
   const { login, loading, error, setError } = useContext(AuthContext);
 
   const handleLogin = async () => {
     if (!email || !password) {
       setError('Please fill in all fields.');
       return;
+    }
+    if (serverUrl) {
+      setBaseUrl(serverUrl.trim());
     }
     await login(email, password);
   };
@@ -33,7 +37,28 @@ export default function LoginScreen({ navigation }) {
       </View>
 
       <View style={styles.card}>
-        <Text style={styles.cardTitle}>Sign In</Text>
+        <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }}>
+          <Text style={styles.cardTitle}>Sign In</Text>
+          <TouchableOpacity onPress={() => setShowServerConfig(!showServerConfig)}>
+            <Text style={{ color: '#6366F1', fontSize: 12, fontWeight: '600' }}>
+              {showServerConfig ? 'Hide Server' : '⚙️ Server Config'}
+            </Text>
+          </TouchableOpacity>
+        </View>
+
+        {showServerConfig ? (
+          <View style={{ marginBottom: 12, backgroundColor: 'rgba(99, 102, 241, 0.1)', padding: 10, borderRadius: 8 }}>
+            <Text style={styles.label}>Backend Server URL</Text>
+            <TextInput
+              style={[styles.input, { marginBottom: 4 }]}
+              placeholder="http://10.0.2.2:8000"
+              placeholderTextColor="#6B7280"
+              value={serverUrl}
+              onChangeText={setServerUrl}
+              autoCapitalize="none"
+            />
+          </View>
+        ) : null}
 
         {error ? <Text style={styles.errorText}>{error}</Text> : null}
 

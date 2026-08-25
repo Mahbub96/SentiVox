@@ -1,24 +1,30 @@
 /* client.js — SentiVox API Client with JWT Authorization Interceptor */
 
 import axios from 'axios';
-import AsyncStorage from '@react-native-async-storage/async-storage';
 
 // API Base URL — Configurable for different environments
 // For local dev:   http://10.0.2.2:8000 (Android emulator)
-//                  http://localhost:8000 (iOS simulator)
-// For production:  https://your-server.com
-const DEFAULT_BASE_URL = __DEV__
+//                  http://192.168.1.X:8000 (Physical device local network)
+// For production:  https://sentivox-api.example.com
+let currentBaseUrl = __DEV__
   ? 'http://10.0.2.2:8000'
-  : 'https://your-server.com';
+  : 'http://10.0.2.2:8000';
 
-export const API_BASE_URL = DEFAULT_BASE_URL;
+export const setBaseUrl = (url) => {
+  if (url) {
+    currentBaseUrl = url;
+    client.defaults.baseURL = url;
+  }
+};
+
+export const getBaseUrl = () => currentBaseUrl;
 
 const client = axios.create({
-  baseURL: API_BASE_URL,
+  baseURL: currentBaseUrl,
   headers: {
     'Content-Type': 'application/json',
   },
-  timeout: 30000, // 30s timeout (inference can be slow on CPU)
+  timeout: 30000, // 30s timeout for audio inference
 });
 
 let authToken = null;
@@ -49,7 +55,6 @@ client.interceptors.response.use(
     // If we get a 401 and haven't retried yet, the token might be expired
     if (error.response?.status === 401 && !originalRequest._retry) {
       originalRequest._retry = true;
-      // Token expired — clear auth state and let the app redirect to login
       authToken = null;
     }
 
@@ -58,3 +63,4 @@ client.interceptors.response.use(
 );
 
 export default client;
+

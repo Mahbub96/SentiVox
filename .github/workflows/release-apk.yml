@@ -1,0 +1,74 @@
+name: Build and Release Android APK
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+jobs:
+  build-and-release:
+    name: Build & Publish Release APK
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Setup Java JDK
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'zulu'
+          java-version: '17'
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: 'mobile/package-lock.json'
+
+      - name: Install Dependencies
+        run: |
+          cd mobile
+          npm ci || npm install
+
+      - name: Expo Prebuild (Generate Android Native Project)
+        run: |
+          cd mobile
+          npx expo prebuild --platform android --no-install
+
+      - name: Build Android Release APK
+        run: |
+          cd mobile/android
+          chmod +x gradlew
+          ./gradlew assembleRelease --no-daemon
+
+      - name: Rename APK Output
+        run: |
+          mkdir -p build_output
+          cp mobile/android/app/build/outputs/apk/release/app-release.apk build_output/SentiVox-v1.0.0.apk
+
+      - name: Create GitHub Release and Upload APK
+        uses: softprops/action-gh-release@v2
+        with:
+          files: build_output/SentiVox-v1.0.0.apk
+          tag_name: ${{ github.ref_name }}
+          name: SentiVox Mobile Release ${{ github.ref_name }}
+          body: |
+            ## 🎙️ SentiVox Mobile Release ${{ github.ref_name }}
+            
+            Enterprise Speech Emotion Recognition Mobile App for Android.
+            
+            ### Features Included:
+            - ⚡ Real-Time Voice Emotion Analysis (7-class probability breakdown)
+            - 🔒 JWT Secure Authentication & Admin Control Panel
+            - 🧠 Model Hot-Swapping & Dynamic Server URL Configuration
+            - 📜 Prediction History Tracking
+            
+            ### Download:
+            Download and install `SentiVox-v1.0.0.apk` below on your Android device.
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
